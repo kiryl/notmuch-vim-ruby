@@ -144,7 +144,6 @@ ruby << EOF
 EOF
 	call s:set_map(g:notmuch_rb_compose_maps)
 	autocmd BufUnload <buffer> call s:compose_unload()
-	startinsert!
 endfunction
 
 function! s:show_info()
@@ -511,9 +510,6 @@ ruby << EOF
 			part.convert.each_line do |l|
 				body_lines << "> %s" % l.chomp
 			end
-			body_lines << ""
-			body_lines << ""
-			body_lines << ""
 
 			reply.body = body_lines.join("\n")
 
