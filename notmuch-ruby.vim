@@ -96,7 +96,7 @@ function! s:compose_send()
 	0,4d
 	write
 
-	let cmdtxt = g:notmuch_sendmail . ' -t -f ' . s:reply_from . ' < ' . fname
+	let cmdtxt = g:notmuch_rb_sendmail . ' -t -f ' . s:reply_from . ' < ' . fname
 	let out = system(cmdtxt)
 	let err = v:shell_error
 	if err
