@@ -12,6 +12,7 @@ let g:notmuch_rb_folders_maps = {
 	\ '<Enter>':	'folders_show_search()',
 	\ 's':		'folders_search_prompt()',
 	\ '=':		'folders_refresh()',
+	\ 'm':		'show_compose()',
 	\ }
 
 let g:notmuch_rb_search_maps = {
@@ -24,6 +25,7 @@ let g:notmuch_rb_search_maps = {
 	\ 's':		'search_search_prompt()',
 	\ '=':		'search_refresh()',
 	\ '?':		'search_info()',
+	\ 'm':		'show_compose()',
 	\ }
 
 let g:notmuch_rb_show_maps = {
@@ -36,6 +38,7 @@ let g:notmuch_rb_show_maps = {
 	\ 'r':		'show_reply()',
 	\ '?':		'show_info()',
 	\ '<Tab>':	'show_next_msg()',
+	\ 'm':		'show_compose()',
 	\ }
 
 let g:notmuch_rb_compose_maps = {
@@ -82,46 +85,7 @@ function! s:new_file_buffer(type, fname)
 	ruby $buf_queue.push($curbuf.number)
 endfunction
 
-function! s:compose_unload()
-	if b:compose_done
-		return
-	endif
-	if input('[s]end/[q]uit? ') =~ '^s'
-		call s:compose_send()
-	endif
-endfunction
-
 "" actions
-
-function! s:compose_quit()
-	let b:compose_done = 1
-	call s:kill_this_buffer()
-endfunction
-
-function! s:compose_send()
-	let b:compose_done = 1
-	let fname = expand('%')
-
-	" remove headers
-	0,4d
-	write
-
-	let cmdtxt = g:notmuch_rb_sendmail . ' -t -f ' . s:reply_from . ' < ' . fname
-	let out = system(cmdtxt)
-	let err = v:shell_error
-	if err
-		undo
-		write
-		echohl Error
-		echo 'Eeek! unable to send mail'
-		echo out
-		echohl None
-		return
-	endif
-	call delete(fname)
-	echo 'Mail sent successfully.'
-	call s:kill_this_buffer()
-endfunction
 
 function! s:show_next_msg()
 ruby << EOF
@@ -137,11 +101,12 @@ ruby << EOF
 EOF
 endfunction
 
+function! s:show_compose()
+	ruby open_compose
+endfunction
+
 function! s:show_reply()
 	ruby open_reply get_message.mail
-	let b:compose_done = 0
-	call s:set_map(g:notmuch_rb_compose_maps)
-	autocmd BufUnload <buffer> call s:compose_unload()
 endfunction
 
 function! s:show_info()
@@ -257,6 +222,13 @@ function! s:set_map(maps)
 	for [key, code] in items(a:maps)
 		let cmd = printf(":call <SID>%s<CR>", code)
 		exec printf('nnoremap <buffer> %s %s', key, cmd)
+	endfor
+endfunction
+
+function! s:set_ruby_map(maps)
+	nmapclear <buffer>
+	for [key, code] in items(a:maps)
+		exec printf('nnoremap <buffer> %s :ruby %s<CR>', key, code)
 	endfor
 endfunction
 
@@ -391,6 +363,7 @@ ruby << EOF
 	require 'rubygems'
 	require 'mail'
 	require 'tempfile'
+	require 'open3'
 
 	$db_name = nil
 	$email_address = nil
@@ -422,6 +395,10 @@ ruby << EOF
 
 	def vim_puts(s)
 		VIM::command("echo '#{s.to_s}'")
+	end
+
+	def vim_error(s)
+		VIM::command("echohl Error | echo '#{s.to_s}' | echohl None")
 	end
 
 	def vim_p(s)
@@ -473,63 +450,131 @@ ruby << EOF
 		end
 	end
 
+	def switch_to_prev_buffer
+		$buf_queue.pop
+		b = $buf_queue.last
+		VIM::command("buffer #{b}") if b
+	end
+
+	def compose_unload
+		b = VIM::Buffer.current
+		return if b.getvar("compose_done") == 1
+		compose_send if VIM::evaluate("input('[s]end/[q]uit? ')") =~ /^s/
+	end
+
+	def compose_send
+		fname = VIM::evaluate("expand('%')")
+		b = VIM::Buffer.current
+
+		msg = (1..b.count).collect { |i|
+			b[i]
+		}.delete_if { |s|
+			s.start_with? "Notmuch-Help:"
+		}.drop_while { |s|
+			s.empty?
+		}.join("\n")
+
+		mail = Mail.new(msg)
+		sendmail = VIM::evaluate('g:notmuch_rb_sendmail')
+		cmd = "%s -t -f %s" % [sendmail, mail.from.first.to_s]
+		o, s = Open3.capture2e(cmd, :stdin_data => msg)
+		if s.success?
+			vim_puts 'Mail sent successfully.'
+			vim_puts o.chomp unless o.empty?
+			compose_quit
+		else
+			vim_error "Eeek! unable to send mail\n"
+			vim_error o.chomp unless o.empty?
+		end
+	end
+
+	def compose_quit
+		b = VIM::Buffer.current
+		b.setvar("compose_done", 1)
+		b.delete!
+		switch_to_prev_buffer
+	end
+
+	def open_compose_buffer(lines, start_line)
+		dir = File.expand_path('~/.notmuch/compose')
+		FileUtils.mkdir_p(dir)
+		f = Tempfile.open(['nm-', '.mail'], dir)
+		f.puts lines
+		f.flush
+
+		b = VIM::Buffer.open(f.path)
+		b.setvar("compose_done", 0)
+		b.setvar("&filetype", "notmuch-compose")
+		b.setvar("&syntax", "notmuch-compose")
+		VIM::command("call s:set_ruby_map(g:notmuch_rb_compose_maps)")
+		VIM::command("autocmd BufUnload <buffer=#{b.number}> ruby compose_unload")
+		b.setpos(".", start_line, 0)
+		$buf_queue.push(b.number)
+	end
+
+	COMPOSE_HELP_LINES = [
+		'Notmuch-Help: Type in your message here; to help you use these bindings:',
+		'Notmuch-Help:   ,s    - send the message (Notmuch-Help lines will be removed)',
+		'Notmuch-Help:   ,q    - abort the message',
+	]
+
+	def open_compose
+		lines = []
+		lines += COMPOSE_HELP_LINES
+		lines << ""
+		lines << "From: #$email_address"
+		lines << "To: "
+		lines << "Cc: #$email_address"
+		lines << "Bcc: "
+		lines << "Subject: "
+		lines << "Reply-To: "
+		lines << ""
+		lines << ""
+		start_line = lines.size
+
+		sig_file = File.expand_path('~/.signature')
+		if File.exists?(sig_file)
+			lines << "-- "
+			lines << File.readlines(sig_file)
+		end
+
+		open_compose_buffer(lines, start_line)
+	end
+
 	def open_reply(orig)
-		help_lines = [
-			'Notmuch-Help: Type in your message here; to help you use these bindings:',
-			'Notmuch-Help:   ,s    - send the message (Notmuch-Help lines will be removed)',
-			'Notmuch-Help:   ,q    - abort the message',
-			]
 		reply = orig.reply do |m|
 			# fix headers
 			if not m[:reply_to]
-				m.to = [orig[:from].to_s, orig[:to].to_s]
+				m.to = [orig[:from].to_s]
 			end
-			m.cc = orig[:cc]
+			m.cc = [orig[:to].to_s, orig[:cc].to_s]
 			m.from = $email_address
 			m.charset = 'utf-8'
 			m.content_transfer_encoding = '7bit'
 		end
 
-		dir = File.expand_path('~/.notmuch/compose')
-		FileUtils.mkdir_p(dir)
-		Tempfile.open(['nm-', '.mail'], dir) do |f|
-			lines = []
+		addr = Mail::Address.new(orig[:from].value)
+		name = addr.name
+		name = addr.local + "@" if name.nil? && !addr.local.nil?
+		name = "somebody" if name.nil?
 
-			lines += help_lines
-			lines << ''
+		lines = []
+		lines += COMPOSE_HELP_LINES
+		lines << ""
+		lines += reply.header.to_s.lines.map { |l| l.chomp }
+		lines << ""
+		lines << "%s wrote:" % name
+		lines += orig.find_first_text.convert.lines.map { |l| "> " + l.chomp }
+		lines << ""
+		start_line = lines.size
 
-			body_lines = []
-			addr = Mail::Address.new(orig[:from].value)
-			name = addr.name
-			name = addr.local + "@" if name.nil? && !addr.local.nil?
-			name = "somebody" if name.nil?
-			body_lines << "%s wrote:" % name
-			part = orig.find_first_text
-			part.convert.each_line do |l|
-				body_lines << "> %s" % l.chomp
-			end
-
-			reply.body = body_lines.join("\n")
-
-			lines += reply.to_s.lines.map { |e| e.chomp }
-			lines << ""
-
-			old_count = lines.count - 1
-
-			f.puts(lines)
-
-			sig_file = File.expand_path('~/.signature')
-			if File.exists?(sig_file)
-				f.puts("-- ")
-				f.write(File.read(sig_file))
-			end
-
-			f.flush
-
-			VIM::command("let s:reply_from='%s'" % reply.from.first.to_s)
-			VIM::command("call s:new_file_buffer('compose', '#{f.path}')")
-			VIM::command("call cursor(#{old_count}, 0)")
+		sig_file = File.expand_path('~/.signature')
+		if File.exists?(sig_file)
+			lines << "-- "
+			lines << File.readlines(sig_file)
 		end
+
+		open_compose_buffer(lines, start_line)
 	end
 
 	def folders_render()
