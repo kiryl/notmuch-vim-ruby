@@ -632,6 +632,11 @@ ruby << EOF
 	end
 
 	class VIM::Buffer
+		def self.open(fpath)
+			VIM::command("edit " + fpath)
+			return VIM::Buffer.current
+		end
+
 		def <<(a)
 			append(count(), a)
 		end
@@ -646,6 +651,27 @@ ruby << EOF
 			(1..old_count).each do
 				delete(1)
 			end
+		end
+
+		def delete!
+			cmd = "bdelete! %d" % number
+			VIM::command(cmd)
+		end
+
+		def getvar(varname)
+			cmd = "getbufvar(%d, %p)" % [number, varname.to_str]
+			VIM::evaluate(cmd)
+		end
+
+		def setvar(varname, val)
+			cmd = "setbufvar(%d, %p, %p)" % [number, varname.to_str, val]
+			VIM::command("call " + cmd)
+			val
+		end
+
+		def setpos(expr, line, col)
+			cmd = "setpos(%p, [%d, %d, %d, 0])" % [expr.to_str, number, line, col]
+			VIM::command("call " + cmd)
 		end
 	end
 
